@@ -18,6 +18,9 @@ const PUSH_IMPULSE = 5.5; // impulse magnitude for push
 const SAFE_MIN_RADIUS = 3.5; // how small the stage can get
 const SAFE_SHRINK_DURATION = 120; // seconds from full to min
 const SAFE_SHRINK_RATE = (ARENA_RADIUS - SAFE_MIN_RADIUS) / SAFE_SHRINK_DURATION; // units per second
+// Bot capsule dimensions (shared by collider and visual)
+const CAPSULE_HALF = 0.45; // half-height of the cylindrical part
+const CAPSULE_RADIUS = 0.4; // radius of capsule caps
 
 // --- Types -----------------------------------------------------------------
 type Vec3 = [number, number, number];
@@ -303,10 +306,10 @@ function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => vo
   canSleep={false}
     >
       {/* physical collider */}
-      <CapsuleCollider args={[0.45, 0.4]} />
-      {/* visual */}
-      <mesh ref={meshRef} castShadow position={[0, 0.5, 0]}>
-        <capsuleGeometry args={[0.4, 0.9, 6, 12]} />
+      <CapsuleCollider args={[CAPSULE_HALF, CAPSULE_RADIUS]} />
+      {/* visual (centered at body origin) */}
+      <mesh ref={meshRef} castShadow>
+        <capsuleGeometry args={[CAPSULE_RADIUS, CAPSULE_HALF * 2, 6, 12]} />
         <meshStandardMaterial color={color} />
       </mesh>
   {/* No HP bar in ring-out mode */}
@@ -389,7 +392,8 @@ function TheWorld() {
       const t = rand(0, Math.PI * 2);
       const x = Math.sin(t) * r;
       const z = Math.cos(t) * r;
-      bodyRefs.current[i]?.setTranslation({ x, y: 0.5, z }, false);
+  // Place body so the capsule just touches the ground (center at half+radius)
+  bodyRefs.current[i]?.setTranslation({ x, y: CAPSULE_HALF + CAPSULE_RADIUS + 0.005, z }, false);
       bodyRefs.current[i]?.setLinvel({ x: 0, y: 0, z: 0 }, false);
     }
     initialized.current = true;
