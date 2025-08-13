@@ -312,6 +312,30 @@ function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => vo
         <capsuleGeometry args={[CAPSULE_RADIUS, CAPSULE_HALF * 2, 6, 12]} />
         <meshStandardMaterial color={color} />
       </mesh>
+      {/* name label above head */}
+      <Html
+        position={[0, CAPSULE_HALF + CAPSULE_RADIUS + 0.25, 0]}
+        center
+        transform={false}
+        distanceFactor={12}
+        style={{ pointerEvents: "none" }}
+      >
+        <div
+          style={{
+            padding: "2px 6px",
+            borderRadius: 6,
+            background: "rgba(0,0,0,0.6)",
+            color: "#fff",
+            fontSize: 12,
+            lineHeight: "14px",
+            fontFamily: "ui-sans-serif, system-ui",
+            opacity: bot.alive ? 1 : 0.4,
+            whiteSpace: "nowrap",
+          }}
+        >
+          Bot #{bot.id}
+        </div>
+      </Html>
   {/* No HP bar in ring-out mode */}
     </RigidBody>
   );
