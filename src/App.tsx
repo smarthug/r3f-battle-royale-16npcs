@@ -3,10 +3,11 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Html, Sky } from "@react-three/drei";
 import type { Mesh, MeshBasicMaterial } from "three";
 import { Physics, RigidBody, CapsuleCollider } from "@react-three/rapier";
+import botsData from "./bots.json";
 
 // --- Tunables ---------------------------------------------------------------
 const ARENA_RADIUS = 16; // world units (smaller map)
-const BOT_COUNT = 16;
+const BOT_COUNT = 8;
 const BOT_SPEED = 6.0; // u/s
 const BOT_ACCEL = 16; // u/s^2
 const BOT_SEPARATION = 2.0; // desired min distance
@@ -29,6 +30,11 @@ interface BotState {
   alive: boolean;
   lastPushAt: number; // time of last push
   targetId: number | null;
+  name: string;
+  pushImpulse: number;
+  moveSpeed: number;
+  pushCooldown: number;
+  color?: string;
 }
 
 // Utility functions ---------------------------------------------------------
@@ -58,9 +64,24 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
   const [safeRadius, setSafeRadius] = useState<number>(ARENA_RADIUS);
   const safeRadiusRef = useRef<number>(ARENA_RADIUS);
   const [bots, setBots] = useState<BotState[]>(() => {
+    const byId = new Map<number, { name?: string; pushImpulse?: number; moveSpeed?: number; pushCooldown?: number; color?: string }>();
+    (botsData as Array<any>).forEach((b) => byId.set(b.id, { name: b.name, pushImpulse: b.pushImpulse, moveSpeed: b.moveSpeed, pushCooldown: b.pushCooldown, color: b.color }));
     const arr: BotState[] = [];
     for (let i = 0; i < BOT_COUNT; i++) {
-    arr.push({ id: i, alive: true, lastPushAt: -999, targetId: null });
+      const cfg: any = byId.get(i) ?? {};
+      // Random fallbacks for missing fields to add variety
+      const randIn = (a: number, b: number) => a + Math.random() * (b - a);
+      arr.push({
+        id: i,
+        alive: true,
+        lastPushAt: -999,
+        targetId: null,
+        name: cfg.name ?? `Bot ${i}`,
+        pushImpulse: typeof cfg.pushImpulse === "number" ? cfg.pushImpulse : randIn(PUSH_IMPULSE * 0.8, PUSH_IMPULSE * 1.25),
+        moveSpeed: typeof cfg.moveSpeed === "number" ? cfg.moveSpeed : randIn(BOT_SPEED * 0.9, BOT_SPEED * 1.15),
+        pushCooldown: typeof cfg.pushCooldown === "number" ? cfg.pushCooldown : randIn(PUSH_COOLDOWN * 0.7, PUSH_COOLDOWN * 1.3),
+        color: typeof cfg.color === "string" ? cfg.color : undefined,
+      });
     }
     return arr;
   });
@@ -187,7 +208,7 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
 
       // Acceleration toward desired, then set linvel on rigidbody
       const desiredDir = norm(desired[0], 0, desired[2]);
-      const targetVel = mul(desiredDir, BOT_SPEED);
+  const targetVel = mul(desiredDir, me.moveSpeed);
       const dv = sub(targetVel, myVel);
       const maxDv = BOT_ACCEL * dt;
       const dvLen = Math.hypot(dv[0], dv[2]);
@@ -202,10 +223,11 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
         const tPos = getPos(target.id);
         const to = sub(tPos, myPos);
         const dist = len2(to[0], to[1], to[2]);
-        if (dist <= PUSH_RANGE && now - me.lastPushAt >= PUSH_COOLDOWN) {
+  if (dist <= PUSH_RANGE && now - me.lastPushAt >= me.pushCooldown) {
           const dir = norm(to[0], 0, to[2]);
+          const impulse = me.pushImpulse ?? PUSH_IMPULSE;
           bodies.current[target.id]?.applyImpulse(
-            { x: dir[0] * PUSH_IMPULSE, y: 0, z: dir[2] * PUSH_IMPULSE },
+            { x: dir[0] * impulse, y: 0, z: dir[2] * impulse },
             true
           );
           me.lastPushAt = now;
@@ -290,7 +312,8 @@ function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => vo
     meshRef.current.scale.setScalar(s);
   });
 
-  const color = bot.alive ? `hsl(${(bot.id * 137) % 360}deg 80% 60%)` : "#333";
+  const defaultHue = `hsl(${(bot.id * 137) % 360}deg 80% 60%)`;
+  const color = bot.alive ? (bot.color ?? defaultHue) : "#333";
   return (
     <RigidBody
   ref={(api: any | null) => {
@@ -333,7 +356,7 @@ function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => vo
             whiteSpace: "nowrap",
           }}
         >
-          Bot #{bot.id}
+          {bot.name}
         </div>
       </Html>
   {/* No HP bar in ring-out mode */}
