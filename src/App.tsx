@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Html, Sky } from "@react-three/drei";
 import type { Mesh } from "three";
-import { Physics, RigidBody, CapsuleCollider } from "@react-three/rapier";
+import { Physics, RigidBody, CapsuleCollider, CuboidCollider } from "@react-three/rapier";
 
 // --- Tunables ---------------------------------------------------------------
 const ARENA_RADIUS = 16; // world units (smaller map)
@@ -45,6 +45,8 @@ function headingFromVelXZ(x: number, z: number) {
 
 // --- Core Simulation --------------------------------------------------------
 function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
+  // Queue eliminations to avoid setState during the physics tick (useFrame)
+  const pendingElimsRef = useRef<Set<number>>(new Set());
   const [bots, setBots] = useState<BotState[]>(() => {
     const arr: BotState[] = [];
     for (let i = 0; i < BOT_COUNT; i++) {
@@ -56,9 +58,26 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
   const aliveCount = useMemo(() => bots.filter((b) => b.alive).length, [bots]);
   const winner = aliveCount === 1 ? bots.find((b) => b.alive) ?? null : null;
 
+  const eliminate = (id: number) => {
+    pendingElimsRef.current.add(id);
+  };
+
   useFrame((_, dt) => {
     const now = performance.now() / 1000;
     const next = bots.map((b) => ({ ...b }));
+
+    // Apply any pending eliminations inside the frame coherently
+    if (pendingElimsRef.current.size > 0) {
+      for (const id of pendingElimsRef.current) {
+        const b = next[id];
+        if (b && b.alive) {
+          b.alive = false;
+          // Disable its rigidbody so it no longer participates in physics
+          bodies.current[id]?.setEnabled(false);
+        }
+      }
+      pendingElimsRef.current.clear();
+    }
 
   const getPos = (id: number) => {
   const rb = bodies.current[id];
@@ -167,17 +186,13 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
         }
       }
 
-  // Ring-out elimination: if fallen below threshold (off the platform)
-      if (myPos[1] < -0.1) {
-        me.alive = false;
-        bodies.current[me.id]?.setEnabled(false);
-      }
+  // No height-based elimination in wall-touch mode
     }
 
-    setBots(next);
+  setBots(next);
   });
 
-  return { bots, aliveCount, winner } as const;
+  return { bots, aliveCount, winner, eliminate } as const;
 }
 
 // --- Renderables ------------------------------------------------------------
@@ -204,14 +219,34 @@ function Arena({ radius }: { radius: number }) {
         <meshBasicMaterial color="#dfeeea" />
       </mesh>
 
-  {/* No physical boundary walls to allow ring-outs */}
+      {/* Physical boundary walls in a ring (elimination on touch) */}
+      {Array.from({ length: 48 }).map((_, i) => {
+        const a = (i / 48) * Math.PI * 2;
+        const x = Math.sin(a) * (radius - 0.25);
+        const z = Math.cos(a) * (radius - 0.25);
+        const rotY = Math.atan2(Math.sin(a), Math.cos(a));
+        return (
+          <RigidBody
+            key={i}
+            type="fixed"
+            colliders={false}
+            position={[x, 0.75, z]}
+            rotation={[0, rotY, 0]}
+            name="wall"
+            // Mark as wall for collision detection
+            userData={{ isWall: true }}
+          >
+            <CuboidCollider args={[0.25, 0.75, 1.2]} restitution={0} friction={0.8} />
+          </RigidBody>
+        );
+      })}
     </group>
   );
 }
 
 // Zone removed for ring-out mode
 
-function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => void }) {
+function Bot({ bot, setBody, onHitWall }: { bot: BotState; setBody: (api: any | null) => void; onHitWall: (id: number) => void }) {
   const meshRef = useRef<Mesh>(null!);
   useFrame(() => {
     // We can't read the body directly here; instead, store it on the mesh for quick access
@@ -238,6 +273,11 @@ function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => vo
       angularDamping={10}
   enabledRotations={[false, false, false]}
       canSleep={false}
+      onCollisionEnter={(e: any) => {
+        const otherObj = e?.other?.rigidBodyObject || e?.other?.colliderObject;
+        const isWall = otherObj?.userData?.isWall || otherObj?.name === "wall";
+        if (isWall && bot.alive) onHitWall(bot.id);
+      }}
     >
       {/* physical collider */}
       <CapsuleCollider args={[0.45, 0.4]} />
@@ -315,7 +355,7 @@ function TheWorld() {
   // Initialize bot spawn positions on first render by placing bodies
   const initialized = useRef(false);
 
-  const { bots, aliveCount, winner } = useBattleRoyalePhysics(bodyRefs);
+  const { bots, aliveCount, winner, eliminate } = useBattleRoyalePhysics(bodyRefs);
 
   // After bodies mount, set spawn positions (once)
   useFrame(() => {
@@ -336,7 +376,7 @@ function TheWorld() {
     <>
       <group position={[0, 0, 0]}>
   <Arena radius={ARENA_RADIUS} />
-        {bots.map((b) => (
+    {bots.map((b) => (
           <Bot
             key={b.id}
             bot={b}
@@ -344,6 +384,7 @@ function TheWorld() {
               if (api) bodyRefs.current[b.id] = api;
               else delete bodyRefs.current[b.id];
             }}
+      onHitWall={(id) => eliminate(id)}
           />
         ))}
       </group>
