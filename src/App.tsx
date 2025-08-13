@@ -1,16 +1,11 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { OrbitControls, Html } from "@react-three/drei";
+import { OrbitControls, Html, Sky } from "@react-three/drei";
 import type { Mesh } from "three";
-import {
-  Physics,
-  RigidBody,
-  CapsuleCollider,
-  CuboidCollider,
-} from "@react-three/rapier";
+import { Physics, RigidBody, CapsuleCollider } from "@react-three/rapier";
 
 // --- Tunables ---------------------------------------------------------------
-const ARENA_RADIUS = 32; // world units
+const ARENA_RADIUS = 16; // world units (smaller map)
 const BOT_COUNT = 16;
 const BOT_SPEED = 6.0; // u/s
 const BOT_ACCEL = 16; // u/s^2
@@ -65,15 +60,15 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
     const now = performance.now() / 1000;
     const next = bots.map((b) => ({ ...b }));
 
-    const getPos = (id: number) => {
+  const getPos = (id: number) => {
   const rb = bodies.current[id];
       const p = rb?.translation();
       return p ? ([p.x, p.y, p.z] as Vec3) : ([0, 0, 0] as Vec3);
     };
     const getVel = (id: number) => {
-  const rb = bodies.current[id];
+      const rb = bodies.current[id];
       const v = rb?.linvel();
-      return v ? ([v.x, 0, v.z] as Vec3) : ([0, 0, 0] as Vec3);
+      return v ? ([v.x, v.y, v.z] as Vec3) : ([0, 0, 0] as Vec3);
     };
 
     for (const me of next) {
@@ -152,11 +147,12 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
       const maxDv = BOT_ACCEL * dt;
       const dvLen = Math.hypot(dv[0], dv[2]);
       const apply = dvLen > maxDv ? mul(dv, maxDv / (dvLen || 1)) : dv;
-      const newVx = myVel[0] + apply[0];
-      const newVz = myVel[2] + apply[2];
-  bodies.current[me.id]?.setLinvel({ x: newVx, y: 0, z: newVz }, true);
+  const newVx = myVel[0] + apply[0];
+  const newVz = myVel[2] + apply[2];
+  // Preserve current vertical velocity so gravity can act and allow falling
+  bodies.current[me.id]?.setLinvel({ x: newVx, y: myVel[1], z: newVz }, true);
 
-      // Push mechanic: if close to target and off cooldown, apply outward impulse
+  // Push mechanic: if close to target and off cooldown, apply outward impulse
       if (target) {
         const tPos = getPos(target.id);
         const to = sub(tPos, myPos);
@@ -171,9 +167,8 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
         }
       }
 
-      // Ring-out elimination: outside arena radius
-      const radial = len2(myPos[0], 0, myPos[2]);
-      if (radial > ARENA_RADIUS) {
+  // Ring-out elimination: if fallen below threshold (off the platform)
+      if (myPos[1] < -0.1) {
         me.alive = false;
         bodies.current[me.id]?.setEnabled(false);
       }
@@ -190,19 +185,23 @@ function Arena({ radius }: { radius: number }) {
   return (
     <group>
       {/* floor visual + physics ground */}
-      <RigidBody type="fixed" colliders={false}>
+      <RigidBody type="fixed" colliders="trimesh">
         <mesh rotation-x={-Math.PI / 2} receiveShadow>
           <circleGeometry args={[radius, 64]} />
-          <meshStandardMaterial roughness={0.9} metalness={0} color="#3a3a3a" />
+          <meshStandardMaterial roughness={1} metalness={0} color="#2ecc71" />
         </mesh>
-        {/* simple large ground box as collider */}
-        <CuboidCollider args={[radius, 0.05, radius]} position={[0, -0.05, 0]} />
       </RigidBody>
+
+      {/* island thickness (visual) */}
+      {/* <mesh position={[0, -0.6, 0]} receiveShadow castShadow>
+        <cylinderGeometry args={[radius * 0.98, radius * 0.98, 1.2, 48]} />
+        <meshStandardMaterial color="#7a5a3a" roughness={1} metalness={0} />
+      </mesh> */}
 
       {/* wall ring (visual) */}
       <mesh rotation-x={-Math.PI / 2} position={[0, 0.01, 0]}>
         <ringGeometry args={[radius * 0.98, radius, 64]} />
-        <meshBasicMaterial color="#3a3a3a" />
+        <meshBasicMaterial color="#dfeeea" />
       </mesh>
 
   {/* No physical boundary walls to allow ring-outs */}
@@ -237,7 +236,7 @@ function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => vo
       colliders={false}
       linearDamping={2.2}
       angularDamping={10}
-      enabledRotations={[false, true, false]}
+  enabledRotations={[false, false, false]}
       canSleep={false}
     >
       {/* physical collider */}
@@ -282,13 +281,13 @@ function HUD({ alive, winner }: { alive: number; winner: BotState | null }) {
 export default function BattleRoyaleR3F() {
   return (
     <div style={{ width: "100%", height: "100%" }}>
-      <Canvas shadows camera={{ position: [0, 24, 30], fov: 50 }}>
-        <color attach="background" args={["#161616"]} />
-        <ambientLight intensity={0.7} />
-        <hemisphereLight color="#ffffff" groundColor="#404040" intensity={0.6} />
+      <Canvas shadows camera={{ position: [0, 16, 22], fov: 50 }}>
+        <Sky turbidity={6} rayleigh={2.2} mieCoefficient={0.005} mieDirectionalG={0.8} sunPosition={[10, 25, -10]} />
+        <ambientLight intensity={0.6} />
+        <hemisphereLight color="#ffffff" groundColor="#c7d7ff" intensity={0.8} />
         <directionalLight
           position={[10, 18, 12]}
-          intensity={1.6}
+          intensity={1.4}
           castShadow
           shadow-mapSize-width={2048}
           shadow-mapSize-height={2048}
