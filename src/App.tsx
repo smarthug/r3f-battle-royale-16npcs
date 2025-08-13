@@ -212,7 +212,7 @@ function Arena({ radius }: { radius: number }) {
       <RigidBody type="fixed" colliders={false}>
         <mesh rotation-x={-Math.PI / 2} receiveShadow>
           <circleGeometry args={[radius, 64]} />
-          <meshStandardMaterial roughness={1} metalness={0} color="#2a2a2a" />
+          <meshStandardMaterial roughness={0.9} metalness={0} color="#3a3a3a" />
         </mesh>
         {/* simple large ground box as collider */}
         <CuboidCollider args={[radius, 0.05, radius]} position={[0, -0.05, 0]} />
@@ -348,11 +348,12 @@ export default function BattleRoyaleR3F() {
   return (
     <div style={{ width: "100%", height: "100%" }}>
       <Canvas shadows camera={{ position: [0, 24, 30], fov: 50 }}>
-        <color attach="background" args={["#0b0b0b"]} />
-        <ambientLight intensity={0.35} />
+        <color attach="background" args={["#161616"]} />
+        <ambientLight intensity={0.7} />
+        <hemisphereLight color="#ffffff" groundColor="#404040" intensity={0.6} />
         <directionalLight
           position={[10, 18, 12]}
-          intensity={1}
+          intensity={1.6}
           castShadow
           shadow-mapSize-width={2048}
           shadow-mapSize-height={2048}
