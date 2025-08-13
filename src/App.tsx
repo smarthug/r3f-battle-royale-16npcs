@@ -12,25 +12,20 @@ import {
 // --- Tunables ---------------------------------------------------------------
 const ARENA_RADIUS = 32; // world units
 const BOT_COUNT = 16;
-const BOT_SPEED = 5.2; // u/s
-const BOT_ACCEL = 14; // u/s^2
-const BOT_SEPARATION = 2.2; // desired min distance
-const ATTACK_RANGE = 1.6;
-const ATTACK_DPS = 22; // damage per second
-const ATTACK_COOLDOWN = 0.45; // seconds between hits
+const BOT_SPEED = 6.0; // u/s
+const BOT_ACCEL = 16; // u/s^2
+const BOT_SEPARATION = 2.0; // desired min distance
 const FOV = Math.PI * 1.1; // ~200 degrees
-const ZONE_START_RADIUS = ARENA_RADIUS * 0.95;
-const ZONE_END_RADIUS = 4;
-const GAME_DURATION = 180; // seconds end-to-end shrink time
-const STORM_DPS = 18; // damage when outside the zone
+const PUSH_RANGE = 1.3; // distance to trigger push
+const PUSH_COOLDOWN = 0.4; // seconds between pushes
+const PUSH_IMPULSE = 5.5; // impulse magnitude for push
 
 // --- Types -----------------------------------------------------------------
 type Vec3 = [number, number, number];
 interface BotState {
   id: number;
-  hp: number; // 0..100
   alive: boolean;
-  lastHitAt: number; // time of last successful attack
+  lastPushAt: number; // time of last push
   targetId: number | null;
 }
 
@@ -58,23 +53,17 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
   const [bots, setBots] = useState<BotState[]>(() => {
     const arr: BotState[] = [];
     for (let i = 0; i < BOT_COUNT; i++) {
-      arr.push({ id: i, hp: 100, alive: true, lastHitAt: -999, targetId: null });
+    arr.push({ id: i, alive: true, lastPushAt: -999, targetId: null });
     }
     return arr;
   });
 
-  const zone = useRef({ t: 0, radius: ZONE_START_RADIUS });
   const aliveCount = useMemo(() => bots.filter((b) => b.alive).length, [bots]);
   const winner = aliveCount === 1 ? bots.find((b) => b.alive) ?? null : null;
 
   useFrame((_, dt) => {
     const now = performance.now() / 1000;
     const next = bots.map((b) => ({ ...b }));
-
-    // Zone shrink
-    zone.current.t = clamp(zone.current.t + dt, 0, GAME_DURATION);
-    const k = zone.current.t / GAME_DURATION;
-    zone.current.radius = ZONE_START_RADIUS * (1 - k) + ZONE_END_RADIUS * k;
 
     const getPos = (id: number) => {
   const rb = bodies.current[id];
@@ -91,12 +80,6 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
       if (!me.alive) continue;
       const myPos = getPos(me.id);
       const myVel = getVel(me.id);
-
-      // Storm damage if outside zone
-      const dFromCenter = len2(myPos[0], 0, myPos[2]);
-      if (dFromCenter > zone.current.radius) {
-        me.hp -= STORM_DPS * dt;
-      }
 
       // Acquire/validate target
       let target: BotState | null = null;
@@ -160,12 +143,7 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
         desired = add(desired, [sepX, 0, sepZ]);
       }
 
-      // Keep roughly inside arena bounds (soft bias, walls handle hard limit)
-      const radial = len2(myPos[0], 0, myPos[2]);
-      if (radial > ARENA_RADIUS * 0.9) {
-        const pull = mul(norm(-myPos[0], 0, -myPos[2]), 2.5);
-        desired = add(desired, pull);
-      }
+  // No keep-in-zone bias: allow ring-outs
 
       // Acceleration toward desired, then set linvel on rigidbody
       const desiredDir = norm(desired[0], 0, desired[2]);
@@ -178,30 +156,33 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
       const newVz = myVel[2] + apply[2];
   bodies.current[me.id]?.setLinvel({ x: newVx, y: 0, z: newVz }, true);
 
-      // Attempt attack if in range & cooldown
+      // Push mechanic: if close to target and off cooldown, apply outward impulse
       if (target) {
         const tPos = getPos(target.id);
         const to = sub(tPos, myPos);
         const dist = len2(to[0], to[1], to[2]);
-        if (dist <= ATTACK_RANGE && now - me.lastHitAt >= ATTACK_COOLDOWN) {
-          const tgt = next[target.id];
-          if (tgt) tgt.hp -= ATTACK_DPS * ATTACK_COOLDOWN;
-          me.lastHitAt = now;
+        if (dist <= PUSH_RANGE && now - me.lastPushAt >= PUSH_COOLDOWN) {
+          const dir = norm(to[0], 0, to[2]);
+          bodies.current[target.id]?.applyImpulse(
+            { x: dir[0] * PUSH_IMPULSE, y: 0, z: dir[2] * PUSH_IMPULSE },
+            true
+          );
+          me.lastPushAt = now;
         }
       }
 
-      // Death handling
-      if (me.hp <= 0) {
+      // Ring-out elimination: outside arena radius
+      const radial = len2(myPos[0], 0, myPos[2]);
+      if (radial > ARENA_RADIUS) {
         me.alive = false;
-        // Disable physics body so it no longer interacts
-  bodies.current[me.id]?.setEnabled(false);
+        bodies.current[me.id]?.setEnabled(false);
       }
     }
 
     setBots(next);
   });
 
-  return { bots, zone, aliveCount, winner } as const;
+  return { bots, aliveCount, winner } as const;
 }
 
 // --- Renderables ------------------------------------------------------------
@@ -224,44 +205,12 @@ function Arena({ radius }: { radius: number }) {
         <meshBasicMaterial color="#3a3a3a" />
       </mesh>
 
-      {/* Physical boundary walls approximated by small boxes in a ring */}
-      {Array.from({ length: 48 }).map((_, i) => {
-        const a = (i / 48) * Math.PI * 2;
-        const x = Math.sin(a) * (radius - 0.5);
-        const z = Math.cos(a) * (radius - 0.5);
-        const rot = Math.atan2(Math.sin(a), Math.cos(a));
-        return (
-          <RigidBody key={i} type="fixed" colliders={false} position={[x, 0.75, z]} rotation={[0, rot, 0]}>
-            <CuboidCollider args={[0.5, 0.75, 2]} />
-          </RigidBody>
-        );
-      })}
+  {/* No physical boundary walls to allow ring-outs */}
     </group>
   );
 }
 
-function Zone({
-  zoneRef,
-}: {
-  zoneRef: React.MutableRefObject<{ t: number; radius: number }>;
-}) {
-  const [r, setR] = useState(zoneRef.current.radius);
-  useFrame(() => setR(zoneRef.current.radius));
-  return (
-    <group>
-      {/* safe circle */}
-      <mesh rotation-x={-Math.PI / 2} position={[0, 0.02, 0]} renderOrder={2}>
-        <ringGeometry args={[Math.max(0, r - 0.2), r, 64]} />
-        <meshBasicMaterial transparent opacity={0.9} />
-      </mesh>
-      {/* fill outside (storm) */}
-      <mesh rotation-x={-Math.PI / 2} position={[0, 0.01, 0]} renderOrder={1}>
-        <ringGeometry args={[r, ARENA_RADIUS * 1.01, 64]} />
-        <meshBasicMaterial color="#7e0b0b" transparent opacity={0.18} />
-      </mesh>
-    </group>
-  );
-}
+// Zone removed for ring-out mode
 
 function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => void }) {
   const meshRef = useRef<Mesh>(null!);
@@ -298,21 +247,7 @@ function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => vo
         <capsuleGeometry args={[0.4, 0.9, 6, 12]} />
         <meshStandardMaterial color={color} />
       </mesh>
-      {/* HP bar (follows body) */}
-      {bot.alive && (
-        <Html position={[0, 1.6, 0]} center distanceFactor={12} style={{ pointerEvents: "none" }}>
-          <div style={{ width: 48, height: 6, background: "#222", borderRadius: 4 }}>
-            <div
-              style={{
-                width: `${clamp(bot.hp, 0, 100)}%`,
-                height: "100%",
-                background: "#38b000",
-                borderRadius: 4,
-              }}
-            />
-          </div>
-        </Html>
-      )}
+  {/* No HP bar in ring-out mode */}
     </RigidBody>
   );
 }
@@ -381,7 +316,7 @@ function TheWorld() {
   // Initialize bot spawn positions on first render by placing bodies
   const initialized = useRef(false);
 
-  const { bots, zone, aliveCount, winner } = useBattleRoyalePhysics(bodyRefs);
+  const { bots, aliveCount, winner } = useBattleRoyalePhysics(bodyRefs);
 
   // After bodies mount, set spawn positions (once)
   useFrame(() => {
@@ -401,8 +336,7 @@ function TheWorld() {
   return (
     <>
       <group position={[0, 0, 0]}>
-        <Arena radius={ARENA_RADIUS} />
-        <Zone zoneRef={zone} />
+  <Arena radius={ARENA_RADIUS} />
         {bots.map((b) => (
           <Bot
             key={b.id}
