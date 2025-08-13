@@ -1,8 +1,8 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Html, Sky } from "@react-three/drei";
-import type { Mesh } from "three";
-import { Physics, RigidBody, CapsuleCollider, CuboidCollider } from "@react-three/rapier";
+import type { Mesh, MeshBasicMaterial } from "three";
+import { Physics, RigidBody, CapsuleCollider } from "@react-three/rapier";
 
 // --- Tunables ---------------------------------------------------------------
 const ARENA_RADIUS = 16; // world units (smaller map)
@@ -14,6 +14,10 @@ const FOV = Math.PI * 1.1; // ~200 degrees
 const PUSH_RANGE = 1.3; // distance to trigger push
 const PUSH_COOLDOWN = 0.4; // seconds between pushes
 const PUSH_IMPULSE = 5.5; // impulse magnitude for push
+// Shrinking safe zone
+const SAFE_MIN_RADIUS = 3.5; // how small the stage can get
+const SAFE_SHRINK_DURATION = 120; // seconds from full to min
+const SAFE_SHRINK_RATE = (ARENA_RADIUS - SAFE_MIN_RADIUS) / SAFE_SHRINK_DURATION; // units per second
 
 // --- Types -----------------------------------------------------------------
 type Vec3 = [number, number, number];
@@ -47,6 +51,9 @@ function headingFromVelXZ(x: number, z: number) {
 function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
   // Queue eliminations to avoid setState during the physics tick (useFrame)
   const pendingElimsRef = useRef<Set<number>>(new Set());
+  // Shrinking safe zone state
+  const [safeRadius, setSafeRadius] = useState<number>(ARENA_RADIUS);
+  const safeRadiusRef = useRef<number>(ARENA_RADIUS);
   const [bots, setBots] = useState<BotState[]>(() => {
     const arr: BotState[] = [];
     for (let i = 0; i < BOT_COUNT; i++) {
@@ -65,6 +72,14 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
   useFrame((_, dt) => {
     const now = performance.now() / 1000;
     const next = bots.map((b) => ({ ...b }));
+
+    // Shrink safe zone over time
+    const newSafe = Math.max(
+      SAFE_MIN_RADIUS,
+      safeRadiusRef.current - SAFE_SHRINK_RATE * Math.max(0, dt)
+    );
+    safeRadiusRef.current = newSafe;
+    setSafeRadius(newSafe);
 
     // Apply any pending eliminations inside the frame coherently
     if (pendingElimsRef.current.size > 0) {
@@ -127,7 +142,7 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
         }
       }
 
-      // Steering: seek target (if any) + separation + keep-in-zone bias
+  // Steering: seek target (if any) + separation + keep-in-zone bias
       let desired: Vec3 = [0, 0, 0];
       if (target) {
         const tPos = getPos(target.id);
@@ -157,7 +172,15 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
         desired = add(desired, [sepX, 0, sepZ]);
       }
 
-  // No keep-in-zone bias: allow ring-outs
+      // Keep-in-zone bias when nearing the shrinking boundary
+      const r = Math.hypot(myPos[0], myPos[2]);
+      const threshold = safeRadiusRef.current * 0.9;
+      if (r > threshold) {
+        const inward = norm(-myPos[0], 0, -myPos[2]);
+        // Scale bias by how far we are past the threshold
+        const bias = clamp((r - threshold) / Math.max(0.001, safeRadiusRef.current - threshold), 0, 1);
+        desired = add(desired, mul(inward as Vec3, 2.0 * bias));
+      }
 
       // Acceleration toward desired, then set linvel on rigidbody
       const desiredDir = norm(desired[0], 0, desired[2]);
@@ -171,7 +194,7 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
   // Preserve current vertical velocity so gravity can act and allow falling
   bodies.current[me.id]?.setLinvel({ x: newVx, y: myVel[1], z: newVz }, true);
 
-  // Push mechanic: if close to target and off cooldown, apply outward impulse
+      // Push mechanic: if close to target and off cooldown, apply outward impulse
       if (target) {
         const tPos = getPos(target.id);
         const to = sub(tPos, myPos);
@@ -186,17 +209,40 @@ function useBattleRoyalePhysics(bodies: React.MutableRefObject<any[]>) {
         }
       }
 
-  // No height-based elimination in wall-touch mode
+      // Eliminate if outside the shrinking safe zone
+      if (Math.hypot(myPos[0], myPos[2]) > safeRadiusRef.current + 0.02) {
+        pendingElimsRef.current.add(me.id);
+      }
     }
 
-  setBots(next);
+    setBots(next);
   });
 
-  return { bots, aliveCount, winner, eliminate } as const;
+  return { bots, aliveCount, winner, eliminate, safeRadius } as const;
 }
 
 // --- Renderables ------------------------------------------------------------
-function Arena({ radius }: { radius: number }) {
+function Arena({ radius, safeRadius }: { radius: number; safeRadius: number }) {
+  // Pulsing ring materials
+  const mainRingMat = useRef<MeshBasicMaterial>(null!);
+  const pulseRingMat = useRef<MeshBasicMaterial>(null!);
+  const pulseRingMesh = useRef<Mesh>(null!);
+
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime();
+    const pulse = (Math.sin(t * 2.0) + 1) * 0.5; // 0..1
+    if (mainRingMat.current) {
+      mainRingMat.current.opacity = 0.65 + 0.25 * pulse;
+    }
+    if (pulseRingMat.current) {
+      pulseRingMat.current.opacity = 0.1 + 0.25 * (1 - pulse);
+    }
+    if (pulseRingMesh.current) {
+      const s = 1 + 0.02 * pulse;
+      pulseRingMesh.current.scale.set(s, 1, s);
+    }
+  });
+
   return (
     <group>
       {/* floor visual + physics ground */}
@@ -213,40 +259,22 @@ function Arena({ radius }: { radius: number }) {
         <meshStandardMaterial color="#7a5a3a" roughness={1} metalness={0} />
       </mesh> */}
 
-      {/* wall ring (visual) */}
-      <mesh rotation-x={-Math.PI / 2} position={[0, 0.01, 0]}>
-        <ringGeometry args={[radius * 0.98, radius, 64]} />
-        <meshBasicMaterial color="#dfeeea" />
+      {/* shrinking safe zone (visual rings with subtle pulse) */}
+      <mesh rotation-x={-Math.PI / 2} position={[0, 0.012, 0]}>
+        <ringGeometry args={[safeRadius * 0.985, safeRadius, 128]} />
+        <meshBasicMaterial ref={mainRingMat} color="#ffffff" transparent depthWrite={false} opacity={0.85} />
       </mesh>
-
-      {/* Physical boundary walls in a ring (elimination on touch) */}
-      {Array.from({ length: 48 }).map((_, i) => {
-        const a = (i / 48) * Math.PI * 2;
-        const x = Math.sin(a) * (radius - 0.25);
-        const z = Math.cos(a) * (radius - 0.25);
-        const rotY = Math.atan2(Math.sin(a), Math.cos(a));
-        return (
-          <RigidBody
-            key={i}
-            type="fixed"
-            colliders={false}
-            position={[x, 0.75, z]}
-            rotation={[0, rotY, 0]}
-            name="wall"
-            // Mark as wall for collision detection
-            userData={{ isWall: true }}
-          >
-            <CuboidCollider args={[0.25, 0.75, 1.2]} restitution={0} friction={0.8} />
-          </RigidBody>
-        );
-      })}
+      <mesh rotation-x={-Math.PI / 2} position={[0, 0.011, 0]} ref={pulseRingMesh}>
+        <ringGeometry args={[safeRadius * 0.99, safeRadius * 1.03, 128]} />
+        <meshBasicMaterial ref={pulseRingMat} color="#b6fff3" transparent depthWrite={false} opacity={0.2} />
+      </mesh>
     </group>
   );
 }
 
 // Zone removed for ring-out mode
 
-function Bot({ bot, setBody, onHitWall }: { bot: BotState; setBody: (api: any | null) => void; onHitWall: (id: number) => void }) {
+function Bot({ bot, setBody }: { bot: BotState; setBody: (api: any | null) => void }) {
   const meshRef = useRef<Mesh>(null!);
   useFrame(() => {
     // We can't read the body directly here; instead, store it on the mesh for quick access
@@ -272,12 +300,7 @@ function Bot({ bot, setBody, onHitWall }: { bot: BotState; setBody: (api: any | 
       linearDamping={2.2}
       angularDamping={10}
   enabledRotations={[false, false, false]}
-      canSleep={false}
-      onCollisionEnter={(e: any) => {
-        const otherObj = e?.other?.rigidBodyObject || e?.other?.colliderObject;
-        const isWall = otherObj?.userData?.isWall || otherObj?.name === "wall";
-        if (isWall && bot.alive) onHitWall(bot.id);
-      }}
+  canSleep={false}
     >
       {/* physical collider */}
       <CapsuleCollider args={[0.45, 0.4]} />
@@ -355,7 +378,7 @@ function TheWorld() {
   // Initialize bot spawn positions on first render by placing bodies
   const initialized = useRef(false);
 
-  const { bots, aliveCount, winner, eliminate } = useBattleRoyalePhysics(bodyRefs);
+  const { bots, aliveCount, winner, eliminate, safeRadius } = useBattleRoyalePhysics(bodyRefs);
 
   // After bodies mount, set spawn positions (once)
   useFrame(() => {
@@ -375,7 +398,7 @@ function TheWorld() {
   return (
     <>
       <group position={[0, 0, 0]}>
-  <Arena radius={ARENA_RADIUS} />
+  <Arena radius={ARENA_RADIUS} safeRadius={safeRadius} />
     {bots.map((b) => (
           <Bot
             key={b.id}
@@ -384,7 +407,6 @@ function TheWorld() {
               if (api) bodyRefs.current[b.id] = api;
               else delete bodyRefs.current[b.id];
             }}
-      onHitWall={(id) => eliminate(id)}
           />
         ))}
       </group>
